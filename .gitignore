@@ -1,0 +1,14 @@
+# Build artifacts
+/daily-digest
+/daily-digest.exe
+*.exe
+
+# Local run wrappers with secrets
+run.local.sh
+run.local.ps1
+
+# Atomic-write temp files
+*.tmp
+
+# Claude Code local settings
+.claude/settings.local.json
