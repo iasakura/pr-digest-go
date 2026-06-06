@@ -27,4 +27,5 @@ $env:GH_TOKEN_2 = "ghp_yyyyyyyyyyyyyyyyyyyy"
 # 特定日を対象にする場合（省略時は本日）:
 # $env:DIGEST_DATE = "2026-06-03"
 
-& (Join-Path $PSScriptRoot "daily-digest.exe")
+# 引数はそのまま転送（例: .\run.local.ps1 -yesterday）
+& (Join-Path $PSScriptRoot "daily-digest.exe") @args
