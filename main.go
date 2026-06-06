@@ -12,6 +12,7 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"flag"
 	"fmt"
 	"io"
 	"net/http"
@@ -20,6 +21,7 @@ import (
 	"os/exec"
 	"path/filepath"
 	"sort"
+	"strconv"
 	"strings"
 	"time"
 )
@@ -39,7 +41,14 @@ type config struct {
 	ClaudeBin  string // path/name of the claude CLI
 	Location   *time.Location
 	HTTPClient *http.Client
-	Day        time.Time // the day to report on (local midnight)
+	Day        time.Time // the logical day to report on (local midnight of the label date)
+	StartHour  int       // hour (0-23) at which the logical day begins, e.g. 8 = 08:00
+}
+
+// options are the command-line overrides for which day to digest.
+type options struct {
+	dateOverride string // -date YYYY-MM-DD; empty means use env/today
+	dayOffset    int    // -yesterday sets this to -1
 }
 
 // pullRequest is the trimmed shape we keep from the search API.
@@ -72,14 +81,28 @@ type accountActivity struct {
 }
 
 func main() {
-	if err := run(); err != nil {
+	opts := parseFlags()
+	if err := run(opts); err != nil {
 		fmt.Fprintln(os.Stderr, "error:", err)
 		os.Exit(1)
 	}
 }
 
-func run() error {
-	cfg, err := loadConfig()
+// parseFlags reads command-line overrides for the target day.
+func parseFlags() options {
+	var opts options
+	var yesterday bool
+	flag.BoolVar(&yesterday, "yesterday", false, "対象を前日（論理日）にする")
+	flag.StringVar(&opts.dateOverride, "date", "", "対象日 YYYY-MM-DD（DIGEST_DATE より優先）")
+	flag.Parse()
+	if yesterday {
+		opts.dayOffset = -1
+	}
+	return opts
+}
+
+func run(opts options) error {
+	cfg, err := loadConfig(opts)
 	if err != nil {
 		return err
 	}
@@ -131,7 +154,7 @@ func run() error {
 
 // ---- configuration ----------------------------------------------------------
 
-func loadConfig() (config, error) {
+func loadConfig(opts options) (config, error) {
 	var cfg config
 
 	cfg.VaultDir = os.Getenv("OBSIDIAN_VAULT")
@@ -156,15 +179,36 @@ func loadConfig() (config, error) {
 	}
 	cfg.Location = loc
 
-	now := time.Now().In(loc)
-	if d := os.Getenv("DIGEST_DATE"); d != "" {
-		parsed, err := time.ParseInLocation("2006-01-02", d, loc)
-		if err != nil {
-			return cfg, fmt.Errorf("DIGEST_DATE は YYYY-MM-DD 形式です: %w", err)
-		}
-		now = parsed
+	// The logical day begins at StartHour (default 08:00). When run before
+	// StartHour, "today" still means the day that started yesterday morning.
+	startHour, err := parseHour(envOr("DIGEST_DAY_START_HOUR", "8"))
+	if err != nil {
+		return cfg, err
 	}
-	cfg.Day = time.Date(now.Year(), now.Month(), now.Day(), 0, 0, 0, 0, loc)
+	cfg.StartHour = startHour
+
+	// Resolve the label date. Explicit date (-date flag or DIGEST_DATE) is taken
+	// as the logical day directly; otherwise derive it from the current time,
+	// shifting back one calendar day when we are still before StartHour.
+	dateStr := opts.dateOverride
+	if dateStr == "" {
+		dateStr = os.Getenv("DIGEST_DATE")
+	}
+	var ref time.Time
+	if dateStr != "" {
+		parsed, err := time.ParseInLocation("2006-01-02", dateStr, loc)
+		if err != nil {
+			return cfg, fmt.Errorf("対象日は YYYY-MM-DD 形式です: %w", err)
+		}
+		ref = parsed
+	} else {
+		ref = time.Now().In(loc)
+		if ref.Hour() < startHour {
+			ref = ref.AddDate(0, 0, -1)
+		}
+	}
+	ref = ref.AddDate(0, 0, opts.dayOffset) // -1 for -yesterday
+	cfg.Day = time.Date(ref.Year(), ref.Month(), ref.Day(), 0, 0, 0, 0, loc)
 
 	// Accounts: GH_LOGIN_1/GH_TOKEN_1/GH_LABEL_1, GH_LOGIN_2/... up to 9.
 	for i := 1; i <= 9; i++ {
@@ -201,6 +245,15 @@ func expandHome(path string) (string, error) {
 	return filepath.Join(home, path[2:]), nil
 }
 
+// parseHour parses an "hour of day" string and validates the 0-23 range.
+func parseHour(s string) (int, error) {
+	h, err := strconv.Atoi(strings.TrimSpace(s))
+	if err != nil || h < 0 || h > 23 {
+		return 0, fmt.Errorf("DIGEST_DAY_START_HOUR は 0〜23 の整数です: %q", s)
+	}
+	return h, nil
+}
+
 func envOr(key, def string) string {
 	if v := os.Getenv(key); v != "" {
 		return v
@@ -218,16 +271,17 @@ func (c config) dayString() string {
 	return c.Day.Format("2006-01-02")
 }
 
-// dayRange returns an inclusive timestamp range for the configured day, in the
-// configured timezone, formatted for GitHub search date qualifiers
-// (e.g. "2026-06-05T00:00:00+09:00..2026-06-05T23:59:59+09:00").
+// dayRange returns an inclusive timestamp range for the configured logical day,
+// in the configured timezone, formatted for GitHub search date qualifiers
+// (e.g. "2026-06-05T08:00:00+09:00..2026-06-06T07:59:59+09:00").
 //
-// GitHub interprets a bare YYYY-MM-DD qualifier as UTC, so for a non-UTC
-// timezone like Asia/Tokyo it would miss activity in the local early morning
-// and wrongly include the previous day's late-night activity. An explicit
-// offset range pins the window to the local day.
+// The window starts at StartHour of the label date and spans 24h. GitHub
+// interprets a bare YYYY-MM-DD qualifier as UTC, so for a non-UTC timezone like
+// Asia/Tokyo it would miss activity in the local early morning and wrongly
+// include the previous day's late-night activity. An explicit offset range
+// pins the window to the local logical day.
 func (c config) dayRange() string {
-	start := c.Day // already local midnight
+	start := time.Date(c.Day.Year(), c.Day.Month(), c.Day.Day(), c.StartHour, 0, 0, 0, c.Location)
 	end := start.Add(24*time.Hour - time.Second)
 	return start.Format(time.RFC3339) + ".." + end.Format(time.RFC3339)
 }
