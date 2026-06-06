@@ -212,9 +212,24 @@ func envOr(key, def string) string {
 
 const githubAPI = "https://api.github.com"
 
-// dayBounds returns the inclusive date string range for the configured day.
+// dayString returns the configured day as YYYY-MM-DD in the local timezone.
+// Used for display: the note filename and report headers.
 func (c config) dayString() string {
 	return c.Day.Format("2006-01-02")
+}
+
+// dayRange returns an inclusive timestamp range for the configured day, in the
+// configured timezone, formatted for GitHub search date qualifiers
+// (e.g. "2026-06-05T00:00:00+09:00..2026-06-05T23:59:59+09:00").
+//
+// GitHub interprets a bare YYYY-MM-DD qualifier as UTC, so for a non-UTC
+// timezone like Asia/Tokyo it would miss activity in the local early morning
+// and wrongly include the previous day's late-night activity. An explicit
+// offset range pins the window to the local day.
+func (c config) dayRange() string {
+	start := c.Day // already local midnight
+	end := start.Add(24*time.Hour - time.Second)
+	return start.Format(time.RFC3339) + ".." + end.Format(time.RFC3339)
 }
 
 // ghGet performs an authenticated GET and decodes JSON into v.
@@ -245,9 +260,8 @@ func ghGet(ctx context.Context, cfg config, token, endpoint string, v any) error
 // updated on the target day. Drafts are included (search returns them; we keep
 // the draft flag). Closed/merged PRs touched today are included too.
 func fetchPullRequests(ctx context.Context, cfg config, acc account) ([]pullRequest, error) {
-	day := cfg.dayString()
-	// author:<login> type:pr updated:<day>
-	q := fmt.Sprintf("author:%s type:pr updated:%s", acc.Login, day)
+	// author:<login> type:pr updated:<start>..<end> (timezone-aware range)
+	q := fmt.Sprintf("author:%s type:pr updated:%s", acc.Login, cfg.dayRange())
 	endpoint := fmt.Sprintf("%s/search/issues?q=%s&per_page=100", githubAPI, url.QueryEscape(q))
 
 	var sr struct {
@@ -295,8 +309,8 @@ func fetchPullRequests(ctx context.Context, cfg config, acc account) ([]pullRequ
 // on the target day. Requires the cloak preview accept header historically, but
 // the current API version returns commit search without it.
 func fetchCommits(ctx context.Context, cfg config, acc account) ([]commit, error) {
-	day := cfg.dayString()
-	q := fmt.Sprintf("author:%s author-date:%s", acc.Login, day)
+	// author:<login> author-date:<start>..<end> (timezone-aware range)
+	q := fmt.Sprintf("author:%s author-date:%s", acc.Login, cfg.dayRange())
 	endpoint := fmt.Sprintf("%s/search/commits?q=%s&per_page=100&sort=author-date&order=desc",
 		githubAPI, url.QueryEscape(q))
 

@@ -4,7 +4,26 @@ import (
 	"os"
 	"path/filepath"
 	"testing"
+	"time"
 )
+
+func TestDayRange(t *testing.T) {
+	jst, err := time.LoadLocation("Asia/Tokyo")
+	if err != nil {
+		t.Fatalf("LoadLocation: %v", err)
+	}
+	cfg := config{Day: time.Date(2026, 6, 5, 0, 0, 0, 0, jst), Location: jst}
+	want := "2026-06-05T00:00:00+09:00..2026-06-05T23:59:59+09:00"
+	if got := cfg.dayRange(); got != want {
+		t.Errorf("dayRange() = %q, want %q", got, want)
+	}
+
+	utc := config{Day: time.Date(2026, 6, 5, 0, 0, 0, 0, time.UTC), Location: time.UTC}
+	wantUTC := "2026-06-05T00:00:00Z..2026-06-05T23:59:59Z"
+	if got := utc.dayRange(); got != wantUTC {
+		t.Errorf("dayRange() UTC = %q, want %q", got, wantUTC)
+	}
+}
 
 func TestExpandHome(t *testing.T) {
 	home, err := os.UserHomeDir()
